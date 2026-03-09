@@ -9,14 +9,36 @@ on:
       source_ref:
         description: 'Branch or commit to build from'
         required: true
-        default: 'main'
+        default: 'master'
 
 permissions:
   contents: write
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win32
+            arch: x64
+            artifact: windows
+          - os: macos-latest
+            platform: darwin
+            arch: arm64
+            artifact: mac-arm64
+          - os: macos-13
+            platform: darwin
+            arch: x64
+            artifact: mac-x64
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            artifact: linux
+
+    runs-on: ${{ matrix.os }}
+
     steps:
       - name: Checkout source (private repo)
         uses: actions/checkout@v4
@@ -40,36 +62,137 @@ jobs:
       - name: Prune Python runtime
         run: node scripts/prune-python-runtime.js
 
-      - name: Build installer
-        run: npx cross-env NODE_OPTIONS='--max-old-space-size=8192' ELECTRON_FORGE_MAKE=1 electron-forge make --platform win32 --arch x64
+      # macOS: generate .icns from icon.png
+      - name: Generate macOS icon
+        if: matrix.platform == 'darwin'
+        run: |
+          mkdir -p assets/icon.iconset
+          sips -z 16 16     assets/icon-16.png   --out assets/icon.iconset/icon_16x16.png
+          sips -z 32 32     assets/icon-32.png   --out assets/icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     assets/icon-32.png   --out assets/icon.iconset/icon_32x32.png
+          sips -z 64 64     assets/icon-64.png   --out assets/icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   assets/icon-128.png  --out assets/icon.iconset/icon_128x128.png
+          sips -z 256 256   assets/icon-256.png  --out assets/icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   assets/icon-256.png  --out assets/icon.iconset/icon_256x256.png
+          sips -z 512 512   assets/icon-512.png  --out assets/icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   assets/icon-512.png  --out assets/icon.iconset/icon_512x512.png
+          sips -z 1024 1024 assets/icon-1024.png --out assets/icon.iconset/icon_512x512@2x.png
+          iconutil -c icns assets/icon.iconset -o assets/icon.icns
 
-      - name: Generate latest.yml
+      - name: Build installer
+        env:
+          NODE_OPTIONS: '--max-old-space-size=8192'
+          ELECTRON_FORGE_MAKE: '1'
+        run: npx electron-forge make --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
+
+      # Upload build output as workflow artifact for the release job
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.artifact }}
+          path: |
+            out/make/**/*.exe
+            out/make/**/*.nupkg
+            out/make/**/RELEASES
+            out/make/**/*.zip
+            out/make/**/*.dmg
+            out/make/**/*.deb
+            out/make/**/*.rpm
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f 2>/dev/null || ls -R artifacts
+
+      - name: Generate latest.yml (Windows)
         shell: bash
         run: |
-          SETUP_EXE="out/make/squirrel.windows/x64/Confusion Flow-${{ inputs.version }} Setup.exe"
-          # Strip the leading 'v' from version for the filename check
           VERSION="${{ inputs.version }}"
           VERSION_NUM="${VERSION#v}"
-          SETUP_EXE="out/make/squirrel.windows/x64/Confusion Flow-${VERSION_NUM} Setup.exe"
-
-          SIZE=$(stat -c%s "$SETUP_EXE" 2>/dev/null || stat -f%z "$SETUP_EXE")
-          SHA512=$(sha512sum "$SETUP_EXE" | cut -d' ' -f1)
-          SHA512_B64=$(echo -n "$SHA512" | xxd -r -p | base64 -w0)
-          DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-
-          cat > "out/make/squirrel.windows/x64/latest.yml" <<EOF
+          SETUP_EXE=$(find artifacts -name "*.exe" -type f | head -1)
+          if [ -n "$SETUP_EXE" ]; then
+            SIZE=$(stat -c%s "$SETUP_EXE")
+            SHA512=$(sha512sum "$SETUP_EXE" | cut -d' ' -f1)
+            SHA512_B64=$(echo -n "$SHA512" | xxd -r -p | base64 -w0)
+            DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+            FILENAME=$(basename "$SETUP_EXE")
+            cat > artifacts/latest.yml <<EOF
           version: ${VERSION_NUM}
           files:
-            - url: Confusion Flow-${VERSION_NUM} Setup.exe
+            - url: ${FILENAME}
               sha512: ${SHA512_B64}
               size: ${SIZE}
-          path: Confusion Flow-${VERSION_NUM} Setup.exe
+          path: ${FILENAME}
           sha512: ${SHA512_B64}
           releaseDate: '${DATE}'
           EOF
+            sed -i 's/^          //' artifacts/latest.yml
+          fi
 
-          # Remove leading whitespace from heredoc
-          sed -i 's/^          //' "out/make/squirrel.windows/x64/latest.yml"
+      - name: Generate latest-mac.yml
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          VERSION_NUM="${VERSION#v}"
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+          MAC_FILES=""
+          for ZIP in $(find artifacts -name "*.zip" -path "*/darwin/*" -type f 2>/dev/null); do
+            SIZE=$(stat -c%s "$ZIP")
+            SHA512=$(sha512sum "$ZIP" | cut -d' ' -f1)
+            SHA512_B64=$(echo -n "$SHA512" | xxd -r -p | base64 -w0)
+            FILENAME=$(basename "$ZIP")
+            MAC_FILES="${MAC_FILES}  - url: ${FILENAME}
+              sha512: ${SHA512_B64}
+              size: ${SIZE}
+          "
+          done
+          if [ -n "$MAC_FILES" ]; then
+            cat > artifacts/latest-mac.yml <<EOF
+          version: ${VERSION_NUM}
+          files:
+          ${MAC_FILES}releaseDate: '${DATE}'
+          EOF
+            sed -i 's/^          //' artifacts/latest-mac.yml
+          fi
+
+      - name: Generate latest-linux.yml
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          VERSION_NUM="${VERSION#v}"
+          DEB=$(find artifacts -name "*.deb" -type f | head -1)
+          if [ -n "$DEB" ]; then
+            SIZE=$(stat -c%s "$DEB")
+            SHA512=$(sha512sum "$DEB" | cut -d' ' -f1)
+            SHA512_B64=$(echo -n "$SHA512" | xxd -r -p | base64 -w0)
+            DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+            FILENAME=$(basename "$DEB")
+            cat > artifacts/latest-linux.yml <<EOF
+          version: ${VERSION_NUM}
+          files:
+            - url: ${FILENAME}
+              sha512: ${SHA512_B64}
+              size: ${SIZE}
+          path: ${FILENAME}
+          sha512: ${SHA512_B64}
+          releaseDate: '${DATE}'
+          EOF
+            sed -i 's/^          //' artifacts/latest-linux.yml
+          fi
+
+      - name: Collect release files
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.deb" -o -name "*.rpm" -o -name "*.yml" -o -name "RELEASES" \) -exec cp {} release/ \;
+          ls -la release/
 
       - name: Create or update release
         uses: softprops/action-gh-release@v2
@@ -81,13 +204,16 @@ jobs:
 
             Visual data pipeline builder — drag, connect, and execute Python workflows.
 
-            ### Installation
-            Download and run `Confusion Flow-${{ inputs.version }} Setup.exe`.
-          files: |
-            out/make/squirrel.windows/x64/Confusion Flow-* Setup.exe
-            out/make/squirrel.windows/x64/latest.yml
-            out/make/squirrel.windows/x64/RELEASES
-          fail_on_unmatched_files: true
+            ### Downloads
+            | Platform | File |
+            |----------|------|
+            | Windows | `Confusion Flow-${{ inputs.version }} Setup.exe` |
+            | macOS (Apple Silicon) | `Confusion Flow-darwin-arm64-${{ inputs.version }}.zip` |
+            | macOS (Intel) | `Confusion Flow-darwin-x64-${{ inputs.version }}.zip` |
+            | Linux (deb) | `confusion-flow_${{ inputs.version }}_amd64.deb` |
+            | Linux (rpm) | `confusion-flow-${{ inputs.version }}-1.x86_64.rpm` |
+          files: release/*
+          fail_on_unmatched_files: false
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
