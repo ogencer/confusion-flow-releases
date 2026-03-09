@@ -1,0 +1,90 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v0.1.0)'
+        required: true
+      source_ref:
+        description: 'Branch or commit to build from'
+        required: true
+        default: 'main'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source (private repo)
+        uses: actions/checkout@v4
+        with:
+          repository: ogencer/confusion-flow-app
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          ref: ${{ inputs.source_ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download Python runtime & uv
+        run: npm run python:download
+
+      - name: Prune Python runtime
+        run: node scripts/prune-python-runtime.js
+
+      - name: Build installer
+        run: npx cross-env NODE_OPTIONS='--max-old-space-size=8192' ELECTRON_FORGE_MAKE=1 electron-forge make --platform win32 --arch x64
+
+      - name: Generate latest.yml
+        shell: bash
+        run: |
+          SETUP_EXE="out/make/squirrel.windows/x64/Confusion Flow-${{ inputs.version }} Setup.exe"
+          # Strip the leading 'v' from version for the filename check
+          VERSION="${{ inputs.version }}"
+          VERSION_NUM="${VERSION#v}"
+          SETUP_EXE="out/make/squirrel.windows/x64/Confusion Flow-${VERSION_NUM} Setup.exe"
+
+          SIZE=$(stat -c%s "$SETUP_EXE" 2>/dev/null || stat -f%z "$SETUP_EXE")
+          SHA512=$(sha512sum "$SETUP_EXE" | cut -d' ' -f1)
+          SHA512_B64=$(echo -n "$SHA512" | xxd -r -p | base64 -w0)
+          DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+          cat > "out/make/squirrel.windows/x64/latest.yml" <<EOF
+          version: ${VERSION_NUM}
+          files:
+            - url: Confusion Flow-${VERSION_NUM} Setup.exe
+              sha512: ${SHA512_B64}
+              size: ${SIZE}
+          path: Confusion Flow-${VERSION_NUM} Setup.exe
+          sha512: ${SHA512_B64}
+          releaseDate: '${DATE}'
+          EOF
+
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' "out/make/squirrel.windows/x64/latest.yml"
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: Confusion Flow ${{ inputs.version }}
+          body: |
+            ## Confusion Flow ${{ inputs.version }}
+
+            Visual data pipeline builder — drag, connect, and execute Python workflows.
+
+            ### Installation
+            Download and run `Confusion Flow-${{ inputs.version }} Setup.exe`.
+          files: |
+            out/make/squirrel.windows/x64/Confusion Flow-* Setup.exe
+            out/make/squirrel.windows/x64/latest.yml
+            out/make/squirrel.windows/x64/RELEASES
+          fail_on_unmatched_files: true
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
