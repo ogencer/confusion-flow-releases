@@ -123,7 +123,7 @@ jobs:
             SHA512=$(sha512sum "$SETUP_EXE" | cut -d' ' -f1)
             SHA512_B64=$(echo -n "$SHA512" | xxd -r -p | base64 -w0)
             DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-            FILENAME=$(basename "$SETUP_EXE")
+            FILENAME=$(basename "$SETUP_EXE" | tr ' ' '.')
             cat > artifacts/latest.yml <<EOF
           version: ${VERSION_NUM}
           files:
@@ -149,7 +149,7 @@ jobs:
             SIZE=$(stat -c%s "$ZIP")
             SHA512=$(sha512sum "$ZIP" | cut -d' ' -f1)
             SHA512_B64=$(echo -n "$SHA512" | xxd -r -p | base64 -w0)
-            FILENAME=$(basename "$ZIP")
+            FILENAME=$(basename "$ZIP" | tr ' ' '.')
             MAC_FILES="${MAC_FILES}  - url: ${FILENAME}
               sha512: ${SHA512_B64}
               size: ${SIZE}
@@ -193,7 +193,9 @@ jobs:
         run: |
           mkdir -p release
           find artifacts -type f \( -name "*.exe" -o -name "*.nupkg" -o -name "*.zip" -o -name "*.deb" -o -name "*.rpm" -o -name "*.yml" -o -name "RELEASES" \) -exec cp {} release/ \;
-          ls -la release/
+          # Rename files with spaces to use dots (GitHub does this anyway, avoids URL mismatch)
+          cd release && for f in *' '*; do [ -e "$f" ] && mv "$f" "$(echo "$f" | tr ' ' '.')"; done
+          ls -la
 
       - name: Create or update release
         uses: softprops/action-gh-release@v2
