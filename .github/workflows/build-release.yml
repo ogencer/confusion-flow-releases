@@ -144,7 +144,8 @@ jobs:
           VERSION_NUM="${VERSION#v}"
           DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
           MAC_FILES=""
-          for ZIP in $(find artifacts -name "*.zip" -path "*/darwin/*" -type f 2>/dev/null); do
+          while IFS= read -r ZIP; do
+            [ -z "$ZIP" ] && continue
             SIZE=$(stat -c%s "$ZIP")
             SHA512=$(sha512sum "$ZIP" | cut -d' ' -f1)
             SHA512_B64=$(echo -n "$SHA512" | xxd -r -p | base64 -w0)
@@ -153,7 +154,7 @@ jobs:
               sha512: ${SHA512_B64}
               size: ${SIZE}
           "
-          done
+          done < <(find artifacts -name "*.zip" -path "*/darwin/*" -type f 2>/dev/null)
           if [ -n "$MAC_FILES" ]; then
             cat > artifacts/latest-mac.yml <<EOF
           version: ${VERSION_NUM}
