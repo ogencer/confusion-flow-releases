@@ -192,7 +192,7 @@ jobs:
       - name: Collect release files
         run: |
           mkdir -p release
-          find artifacts -type f \( -name "*.exe" -o -name "*.zip" -o -name "*.deb" -o -name "*.rpm" -o -name "*.yml" -o -name "RELEASES" \) -exec cp {} release/ \;
+          find artifacts -type f \( -name "*.exe" -o -name "*.nupkg" -o -name "*.zip" -o -name "*.deb" -o -name "*.rpm" -o -name "*.yml" -o -name "RELEASES" \) -exec cp {} release/ \;
           ls -la release/
 
       - name: Create or update release
